@@ -137,14 +137,7 @@ cd src/robot_controller
 pytest
 ```
 
-Notes importantes (discrepancies dét## Prérequis
-- Raspberry Pi (Raspberry Pi OS ou Ubuntu)
-- Robot GoPiGo3
-- Python 3.8+
-- OpenCV (`opencv-python`)
-- ROS2 Jazzy
-- Git
-ectées)
+Notes importantes 
 ------------------------------------------
 
 - Le `setup.py` ajoute des fichiers web depuis `robot_controller/web/` mais l'UI présente dans le dépôt est sous `web2/`. Si vous voulez que l'UI soit installée automatiquement lors du build, déplacez/dupliquez `web2/` en `robot_controller/web/` ou mettez à jour `setup.py`.
