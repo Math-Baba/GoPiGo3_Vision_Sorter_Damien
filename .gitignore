@@ -1,0 +1,37 @@
+# ROS2 build
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+*.so
+
+# Environnement virtuel
+venv/
+.env
+
+# Editeurs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+rosout*
+
+# Fichiers temporaires caméra
+*.jpg
+*.jpeg
+*.png
+*.mp4

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Robot Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0a0a0f; --surface: #12131a; --surface2: #1a1b25;
+    --border: #2a2b38; --text: #e0e0e8; --dim: #6b6c7a;
+    --accent: #00ff88; --accent-dim: #00ff8833;
+    --red: #ff4455; --blue: #4488ff; --yellow: #ffcc00; --green: #00ff88;
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Courier New', monospace; min-height: 100vh;
+  }
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .header h1 { font-size: 18px; color: var(--accent); letter-spacing: 2px; }
+  .header h1 span { color: var(--dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
+  .dot.on { background: var(--green); animation: pulse 2s infinite; }
+  .dot.off { background: var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  .conn { font-size: 11px; color: var(--dim); display: flex; align-items: center; }
+
+  .grid {
+    display: grid; grid-template-columns: 1fr 300px;
+    gap: 12px; padding: 12px 20px; max-width: 1200px; margin: 0 auto;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  }
+  .card-head {
+    padding: 8px 14px; font-size: 10px; font-weight: bold; text-transform: uppercase;
+    letter-spacing: 1.5px; color: var(--dim); border-bottom: 1px solid var(--border); background: var(--surface2);
+  }
+
+  .cam-card { grid-row: 1 / 4; }
+  .cam-box { width: 100%; aspect-ratio: 4/3; background: #000; display: flex; align-items: center; justify-content: center; }
+  .cam-box img { width: 100%; height: 100%; object-fit: contain; }
+  .cam-box .wait { color: var(--dim); font-size: 12px; }
+
+  .state-box { padding: 14px; }
+  .state-name { font-size: 26px; font-weight: bold; color: var(--accent); text-shadow: 0 0 15px var(--accent-dim); }
+  .chips { display: flex; gap: 8px; margin-top: 8px; }
+  .chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 8px; border-radius: 3px; font-size: 10px;
+    background: var(--surface2); border: 1px solid var(--border);
+  }
+  .cdot { width: 8px; height: 8px; border-radius: 2px; }
+  .flow { padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 3px; }
+  .fs {
+    padding: 3px 6px; font-size: 8px; border-radius: 2px;
+    background: var(--surface2); border: 1px solid var(--border); color: var(--dim);
+  }
+  .fs.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); font-weight: bold; }
+  .fa { color: var(--dim); font-size: 8px; display: flex; align-items: center; }
+
+  .compass-wrap { display: flex; align-items: center; justify-content: center; padding: 16px; }
+  .compass { position: relative; width: 130px; height: 130px; }
+  .c-ring { width: 100%; height: 100%; border: 2px solid var(--border); border-radius: 50%; position: relative; }
+  .c-lbl { position: absolute; font-size: 9px; font-weight: bold; color: var(--dim); }
+  .c-lbl.n { top: 3px; left: 50%; transform: translateX(-50%); color: var(--accent); }
+  .c-lbl.s { bottom: 3px; left: 50%; transform: translateX(-50%); }
+  .c-lbl.e { right: 5px; top: 50%; transform: translateY(-50%); }
+  .c-lbl.w { left: 5px; top: 50%; transform: translateY(-50%); }
+  .needle {
+    position: absolute; top: 50%; left: 50%; width: 3px; height: 50px;
+    margin-left: -1.5px; margin-top: -45px;
+    background: linear-gradient(var(--accent) 50%, var(--red) 50%);
+    border-radius: 2px; transform-origin: 50% 78%; transition: transform 0.15s;
+  }
+  .c-center { position: absolute; top:50%; left:50%; width:8px; height:8px; margin:-4px; background:var(--text); border-radius:50%; }
+  .hdg { text-align: center; font-size: 20px; font-weight: bold; margin-top: 6px; }
+  .hdg span { color: var(--dim); font-size: 12px; }
+
+  .cubes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 12px; }
+  .cc {
+    display: flex; align-items: center; gap: 6px; padding: 8px 10px;
+    background: var(--surface2); border-radius: 4px; border: 1px solid var(--border);
+  }
+  .cb { width: 20px; height: 20px; border-radius: 3px; }
+  .cv { font-size: 18px; font-weight: bold; }
+  .cl { font-size: 9px; color: var(--dim); text-transform: uppercase; }
+  .total {
+    padding: 10px 14px; border-top: 1px solid var(--border);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .tv { font-size: 28px; font-weight: bold; color: var(--accent); }
+  .tl { font-size: 10px; color: var(--dim); }
+
+  @media(max-width:800px) { .grid { grid-template-columns: 1fr; } .cam-card { grid-row: auto; } }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>ROBOT <span>DASHBOARD</span></h1>
+  <div class="conn"><div class="dot off" id="dot"></div><span id="ct">Connexion...</span></div>
+</div>
+<div class="grid">
+  <div class="card cam-card">
+    <div class="card-head">Camera + Detections</div>
+    <div class="cam-box">
+      <img id="cam" style="display:none">
+      <div class="wait" id="nf">En attente...</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-direction:column;gap:12px;">
+    <div class="card">
+      <div class="card-head">Etat</div>
+      <div class="state-box">
+        <div class="state-name" id="sn">—</div>
+        <div class="chips">
+          <div class="chip"><div class="cdot" id="td" style="background:#333"></div><span id="tt">—</span></div>
+          <div class="chip"><span id="at">area: —</span></div>
+        </div>
+      </div>
+      <div class="flow" id="fl"></div>
+    </div>
+    <div class="card">
+      <div class="card-head">IMU</div>
+      <div class="compass-wrap"><div>
+        <div class="compass">
+          <div class="c-ring">
+            <div class="c-lbl n">A</div><div class="c-lbl s">B</div>
+            <div class="c-lbl e">90</div><div class="c-lbl w">-90</div>
+          </div>
+          <div class="needle" id="ndl"></div><div class="c-center"></div>
+        </div>
+        <div class="hdg"><span id="hv">0.0</span><span>°</span></div>
+      </div></div>
+    </div>
+    <div class="card">
+      <div class="card-head">Cubes</div>
+      <div class="cubes">
+        <div class="cc"><div class="cb" style="background:#00ff88"></div><div><div class="cv" id="cg">0</div><div class="cl">Vert</div></div></div>
+        <div class="cc"><div class="cb" style="background:#4488ff"></div><div><div class="cv" id="cb">0</div><div class="cl">Bleu</div></div></div>
+        <div class="cc"><div class="cb" style="background:#ffcc00"></div><div><div class="cv" id="cy">0</div><div class="cl">Jaune</div></div></div>
+        <div class="cc"><div class="cb" style="background:#ff4455"></div><div><div class="cv" id="cr">0</div><div class="cl">Rouge</div></div></div>
+      </div>
+      <div class="total"><div class="tl">TOTAL</div><div class="tv" id="tot">0</div></div>
+    </div>
+  </div>
+</div>
+<script>
+const ST=['CHERCHER','ALIGNER','APPROCHER','POUSSER','RETOUR_CENTRE','ORIENTER_ZONE','POUSSER_DROIT','RETOUR','CHERCHER'];
+const CM={red:'#ff4455',green:'#00ff88',blue:'#4488ff',yellow:'#ffcc00'};
+const fl=document.getElementById('fl');
+ST.forEach((s,i)=>{
+  const e=document.createElement('div');e.className='fs';e.textContent=s;e.dataset.s=s;fl.appendChild(e);
+  if(i<ST.length-1){const a=document.createElement('div');a.className='fa';a.textContent='→';fl.appendChild(a);}
+});
+
+const host=window.location.hostname||'11.255.255.201';
+let ok=false;
+
+async function poll(){
+  try{
+    const r=await fetch(`http://${host}:8080/api/state`);
+    const d=await r.json();
+    if(!ok){ok=true;document.getElementById('dot').className='dot on';document.getElementById('ct').textContent='Connecte';}
+    const s=d.state||{};
+    document.getElementById('sn').textContent=s.state||'—';
+    document.querySelectorAll('.fs').forEach(e=>e.classList.toggle('on',e.dataset.s===s.state));
+    const tg=s.target||null;
+    document.getElementById('td').style.background=tg?CM[tg]||'#333':'#333';
+    document.getElementById('tt').textContent=tg||'—';
+    document.getElementById('at').textContent='area: '+(s.last_area||0);
+    document.getElementById('hv').textContent=(d.imu||0).toFixed(1);
+    document.getElementById('ndl').style.transform='rotate('+(d.imu||0)+'deg)';
+    const so=s.sorted||{};
+    document.getElementById('cg').textContent=so.green||0;
+    document.getElementById('cb').textContent=so.blue||0;
+    document.getElementById('cy').textContent=so.yellow||0;
+    document.getElementById('cr').textContent=so.red||0;
+    document.getElementById('tot').textContent=s.total||0;
+  }catch(e){
+    if(ok){ok=false;document.getElementById('dot').className='dot off';document.getElementById('ct').textContent='Deconnecte';}
+  }
+}
+
+async function frame(){
+  try{
+    const r=await fetch(`http://${host}:8080/api/frame`);
+    const b=await r.text();
+    if(b){
+      document.getElementById('cam').src='data:image/jpeg;base64,'+b;
+      document.getElementById('cam').style.display='block';
+      document.getElementById('nf').style.display='none';
+    }
+  }catch(e){}
+}
+
+setInterval(poll, 150);
+setInterval(frame, 200);
+</script>
+</body>
+</html>
