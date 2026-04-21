@@ -25,10 +25,12 @@ sleep 1
 ros2 run robot_controller imu_node &
 sleep 1
 ros2 run robot_controller aruco_localizer &
+sleep 1
+ros2 run robot_controller dashboard_node &
 sleep 2
 
 echo "=== BASE LANCEE ==="
+echo "Dashboard: http://$(hostname -I | awk '{print $1}'):8080"
 echo "Lance la strat: ros2 run robot_controller cube_strategy"
-echo "Lance le dashboard: ros2 run robot_controller dashboard_node"
 echo "Ctrl+C pour tout arreter"
 wait
