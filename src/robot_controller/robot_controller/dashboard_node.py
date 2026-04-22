@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, String, Empty
 from sensor_msgs.msg import Image
 import json
 import time
@@ -26,10 +26,23 @@ class DashboardNode(Node):
         self.create_subscription(String, '/cube_detections', self.detections_cb, 10)
         self.create_subscription(Float32, '/imu/heading', self.imu_cb, 10)
         self.create_subscription(Image, '/image_raw', self.image_cb, 10)
+
+        # Publishers pour les commandes depuis l'UI (endpoints HTTP POST)
+        self.control_pub = self.create_publisher(String, '/robot_control', 10)
+        self.imu_reset_pub = self.create_publisher(Empty, '/imu/reset', 10)
+
         self.create_timer(0.1, self.update_data)
 
         self.get_logger().info('=== DASHBOARD NODE ===')
         self.get_logger().info('Web UI: http://0.0.0.0:8080')
+
+    def publish_control(self, payload):
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.control_pub.publish(msg)
+
+    def publish_imu_reset(self):
+        self.imu_reset_pub.publish(Empty())
 
     def status_cb(self, msg):
         self.latest_state = json.loads(msg.data)
@@ -102,6 +115,31 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_POST(self):
+        if self.path == '/api/control':
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8') if length > 0 else '{}'
+            try:
+                payload = json.loads(body)
+            except Exception:
+                self.send_error(400, 'bad json')
+                return
+            _node.publish_control(payload)
+            self.send_json('{"ok":true}')
+        elif self.path == '/api/imu_reset':
+            _node.publish_imu_reset()
+            self.send_json('{"ok":true}')
+        else:
+            self.send_error(404)
+
+    def do_OPTIONS(self):
+        # CORS preflight
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
     def serve_file(self, name, ctype):
         web_dir = os.path.expanduser('~/ROS2_WS/src/robot_controller/web2')
         path = os.path.join(web_dir, name)
@@ -118,6 +156,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
         self.wfile.write(data.encode())
 

@@ -1,6 +1,6 @@
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, String, Empty
 import serial
 import struct
 import time
@@ -19,10 +19,16 @@ class IMUNode(Node):
 
         self.heading_pub = self.create_publisher(Float32, '/imu/heading', 10)
         self.imu_data_pub = self.create_publisher(String, '/imu/data', 10)
+        self.reset_sub = self.create_subscription(Empty, '/imu/reset', self.reset_cb, 10)
         self.timer = self.create_timer(0.05, self.read_imu)  # 20Hz
         self.buf = b''
 
         self.get_logger().info('=== IMU BNO085 UART-RVC ===')
+
+    def reset_cb(self, _msg):
+        """Re-zerote le heading sur la prochaine lecture (offset = yaw courant)."""
+        self.heading_offset = None
+        self.get_logger().info('[IMU] Reset demande: offset recalcule au prochain tick')
 
     def init_serial(self):
         try:

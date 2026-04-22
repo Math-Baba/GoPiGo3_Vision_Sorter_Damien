@@ -27,10 +27,13 @@ sleep 1
 ros2 run robot_controller aruco_localizer &
 sleep 1
 ros2 run robot_controller dashboard_node &
+sleep 1
+# cube_strategy demarre en pause (active=False), le Start se fait via le dashboard
+ros2 run robot_controller cube_strategy &
 sleep 2
 
 echo "=== BASE LANCEE ==="
 echo "Dashboard: http://$(hostname -I | awk '{print $1}'):8080"
-echo "Lance la strat: ros2 run robot_controller cube_strategy"
+echo "La strat est PAUSEE, clique Start sur le dashboard pour demarrer."
 echo "Ctrl+C pour tout arreter"
 wait

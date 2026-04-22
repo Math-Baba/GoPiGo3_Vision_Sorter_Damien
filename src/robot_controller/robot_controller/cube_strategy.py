@@ -39,10 +39,22 @@ class CubeStrategy(Node):
     def __init__(self):
         super().__init__('cube_strategy')
 
-        # Etat
+        # Etat + controle depuis UI (demarrage en pause, l'utilisateur clique
+        # sur Start dans le dashboard pour autoriser les mouvements).
         self.state = 'CHERCHER'
+        self.active = False
         self.state_start_time = time.time()
         self.last_loop_time = time.time()
+
+        # Couleurs a trier + mapping mur de depot (configurable depuis l'UI).
+        # Par defaut: toutes les couleurs, vert/bleu -> mur A (0), rouge/jaune -> mur B (180).
+        self.sort_colors = ['green', 'blue', 'red', 'yellow']
+        self.depot_heading = {
+            'green': 0.0,
+            'blue': 0.0,
+            'red': 180.0,
+            'yellow': 180.0,
+        }
 
         # Cube cible
         self.target_color = None
@@ -129,11 +141,14 @@ class CubeStrategy(Node):
         self.create_subscription(String, '/cube_detections', self.detection_cb, 10)
         self.create_subscription(Float32, '/imu/heading', self.imu_cb, 10)
         self.create_subscription(String, '/odom_simple', self.odom_cb, 10)
+        self.create_subscription(String, '/robot_control', self.control_cb, 10)
         self.pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.status_pub = self.create_publisher(String, '/robot_status', 10)
         self.create_timer(0.1, self.loop)
 
-        self.get_logger().info('=== CUBE SORTER v6.4 (base v6 + stall detection) ===')
+        self.get_logger().info(
+            '=== CUBE SORTER v6.5 (base v6 + stall + UI control) - EN PAUSE (Start via UI) ==='
+        )
 
     # ============================================================ Callbacks
 
@@ -167,6 +182,68 @@ class CubeStrategy(Node):
         self.odom_y = data.get('y', 0.0)
         self.has_odom = True
 
+    def control_cb(self, msg):
+        """Commandes depuis le dashboard web (via /api/control -> /robot_control).
+
+        Payload JSON:
+          {"action": "start"}                       -> active=True
+          {"action": "pause"}                       -> active=False, stop moteurs
+          {"action": "reset"}                       -> active=False, clean state + compteurs
+          {"action": "config", "sorting": [...],
+           "mapping": {"green": 0, "blue": 180}}    -> couleurs + mur de depot
+        """
+        try:
+            cmd = json.loads(msg.data)
+        except Exception as e:
+            self.get_logger().warn(f'[CTRL] bad payload: {e}')
+            return
+        action = cmd.get('action', '')
+
+        if action == 'start':
+            self.active = True
+            self.get_logger().info('[CTRL] START')
+        elif action == 'pause':
+            self.active = False
+            self.stop()
+            self.get_logger().info('[CTRL] PAUSE')
+        elif action == 'reset':
+            self.active = False
+            self.stop()
+            self.servo_open()
+            self.state = 'CHERCHER'
+            self.state_start_time = time.time()
+            self.target_color = None
+            self.push_color = None
+            self.confirm_count = 0
+            self.confirm_color = None
+            self.distance_forward = 0.0
+            self.distance_push = 0.0
+            self.cubes_sorted = {}
+            self.total_sorted = 0
+            self._chercher_start_heading = None
+            self._chercher_rotation_done = 0.0
+            self.get_logger().info('[CTRL] RESET - clean state + compteurs 0')
+        elif action == 'config':
+            sorting = cmd.get('sorting')
+            mapping = cmd.get('mapping')
+            if isinstance(sorting, list) and all(isinstance(c, str) for c in sorting):
+                self.sort_colors = [c for c in sorting if c in ('green', 'blue', 'red', 'yellow')]
+            if isinstance(mapping, dict):
+                for color, heading in mapping.items():
+                    if color not in ('green', 'blue', 'red', 'yellow'):
+                        continue
+                    try:
+                        h = float(heading)
+                    except Exception:
+                        continue
+                    # Snap au plus proche (0 ou 180)
+                    self.depot_heading[color] = 0.0 if abs(h) < 90 else 180.0
+            self.get_logger().info(
+                f'[CTRL] Config sort={self.sort_colors} mapping={self.depot_heading}'
+            )
+        else:
+            self.get_logger().warn(f'[CTRL] action inconnue: {action}')
+
     # ============================================================ Utilities
 
     def cmd(self, linear=0.0, angular=0.0):
@@ -198,6 +275,7 @@ class CubeStrategy(Node):
         msg = String()
         msg.data = json.dumps({
             'state': self.state,
+            'active': self.active,
             'target': self.target_color,
             'sorted': self.cubes_sorted,
             'total': self.total_sorted,
@@ -207,6 +285,8 @@ class CubeStrategy(Node):
             'odom_y': round(self.odom_y, 2),
             'dist_fwd': round(self.distance_forward, 2),
             'dist_push': round(self.distance_push, 2),
+            'sort_colors': self.sort_colors,
+            'depot_heading': self.depot_heading,
         })
         self.status_pub.publish(msg)
 
@@ -317,6 +397,11 @@ class CubeStrategy(Node):
 
     def loop(self):
         self.publish_status()
+        # Gate principal: si on n'est pas actif (start UI pas cliquee, ou pause),
+        # on ne publie AUCUNE commande moteur. Le driver gopigo3 coupe les
+        # moteurs apres 1s sans cmd_vel (timeout existant dans cmd_vel_cb).
+        if not self.active:
+            return
         handler = {
             'CHERCHER': self.state_chercher,
             'ALIGNER': self.state_aligner,
@@ -355,6 +440,11 @@ class CubeStrategy(Node):
                 return
 
         cube = self.get_target_cube()
+        # Filtre UI: on ignore les cubes dont la couleur n'est pas dans la
+        # liste des couleurs a trier (configurable depuis le dashboard).
+        if cube and cube['color'] not in self.sort_colors:
+            cube = None
+
         if cube:
             if cube['color'] == self.confirm_color:
                 self.confirm_count += 1
@@ -528,9 +618,11 @@ class CubeStrategy(Node):
         self.cmd(linear=-self.push_speed)
 
     def state_orienter_zone(self):
-        """Rotation IMU vers 0 (vert/bleu) ou 180 (rouge/jaune)."""
+        """Rotation IMU vers le cap du mur de depot pour la couleur capturee.
+        Le mapping couleur -> cap (0 ou 180) est configurable depuis le dashboard.
+        """
         color = self.push_color or 'unknown'
-        target = 0.0 if color in ['green', 'blue'] else 180.0
+        target = self.depot_heading.get(color, 0.0)
         elapsed = time.time() - self.state_start_time
 
         if not self.has_imu:
