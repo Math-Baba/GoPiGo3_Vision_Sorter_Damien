@@ -1,9 +1,27 @@
 <!DOCTYPE html>
+<!--
+  Dashboard web du robot trieur. Servi par dashboard_node sur le port 8080.
+
+  Contenu:
+    - Flux camera annote (GET /api/frame, refresh 200ms)
+    - Panneaux de controle: Start / Pause / Reset / Reset IMU
+    - Configuration couleurs + mapping mur de depot (POST /api/control)
+    - Etat courant + carte exploration (GET /api/state, refresh 150ms)
+    - Boussole IMU + mini-carte + compteurs de cubes tries
+
+  Badge du header:
+    ACTIVE (vert)  - robot en tri actif
+    PAUSE  (jaune) - pause manuelle
+    TERMINE (bleu) - auto-stop apres exploration complete
+
+  Polling HTTP: pas de WebSocket, juste des fetch periodiques. Simple et
+  suffisant pour 10Hz de donnees.
+-->
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Robot Dashboard</title>
+<title>Robot Dashboard v9</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -12,132 +30,246 @@
     --accent: #00ff88; --accent-dim: #00ff8833;
     --red: #ff4455; --blue: #4488ff; --yellow: #ffcc00; --green: #00ff88;
   }
-  body {
-    background: var(--bg); color: var(--text);
-    font-family: 'Courier New', monospace; min-height: 100vh;
-  }
+  body { background:var(--bg); color:var(--text); font-family:'Courier New',monospace; }
   .header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--surface);
+    display:flex; align-items:center; justify-content:space-between;
+    padding:10px 16px; border-bottom:1px solid var(--border); background:var(--surface);
   }
-  .header h1 { font-size: 18px; color: var(--accent); letter-spacing: 2px; }
-  .header h1 span { color: var(--dim); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px; }
-  .dot.on { background: var(--green); animation: pulse 2s infinite; }
-  .dot.off { background: var(--red); }
+  .header h1 { font-size:16px; color:var(--accent); letter-spacing:2px; }
+  .header h1 span { color:var(--dim); }
+  .dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:6px; }
+  .dot.on { background:var(--green); animation:pulse 2s infinite; }
+  .dot.off { background:var(--red); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
-  .conn { font-size: 11px; color: var(--dim); display: flex; align-items: center; }
+  .conn { font-size:11px; color:var(--dim); display:flex; align-items:center; gap:12px; }
+  .run-badge { padding:3px 8px; border-radius:3px; font-size:10px; font-weight:bold; letter-spacing:1px; }
+  .run-badge.active { background:var(--green); color:#000; }
+  .run-badge.paused { background:var(--yellow); color:#000; }
+  .run-badge.done {
+    background:var(--blue); color:#fff;
+    animation: donePulse 1.6s ease-in-out infinite;
+  }
+  @keyframes donePulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(68,136,255,0.6); }
+    50%     { box-shadow: 0 0 0 6px rgba(68,136,255,0); }
+  }
+  .grid { display:grid; grid-template-columns:1fr 360px; gap:10px; padding:10px 16px; max-width:1320px; margin:0 auto; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+  .card-head { padding:6px 12px; font-size:9px; font-weight:bold; text-transform:uppercase; letter-spacing:1.5px; color:var(--dim); border-bottom:1px solid var(--border); background:var(--surface2); }
+  .cam-card { align-self:start; position:sticky; top:10px; }
+  .cam-box { width:100%; aspect-ratio:4/3; background:#000; display:flex; align-items:center; justify-content:center; }
+  .cam-box img { width:100%; height:100%; object-fit:contain; }
+  .cam-box .wait { color:var(--dim); font-size:12px; }
 
-  .grid {
-    display: grid; grid-template-columns: 1fr 300px;
-    gap: 12px; padding: 12px 20px; max-width: 1200px; margin: 0 auto;
-  }
-  .card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
-  }
-  .card-head {
-    padding: 8px 14px; font-size: 10px; font-weight: bold; text-transform: uppercase;
-    letter-spacing: 1.5px; color: var(--dim); border-bottom: 1px solid var(--border); background: var(--surface2);
-  }
+  .state-box { padding:10px 12px; }
+  .state-name { font-size:22px; font-weight:bold; color:var(--accent); }
+  .chips { display:flex; gap:6px; margin-top:6px; flex-wrap:wrap; }
+  .chip { display:inline-flex; align-items:center; gap:4px; padding:2px 7px; border-radius:3px; font-size:9px; background:var(--surface2); border:1px solid var(--border); }
+  .cdot { width:7px; height:7px; border-radius:2px; }
 
-  .cam-card { grid-row: 1 / 4; }
-  .cam-box { width: 100%; aspect-ratio: 4/3; background: #000; display: flex; align-items: center; justify-content: center; }
-  .cam-box img { width: 100%; height: 100%; object-fit: contain; }
-  .cam-box .wait { color: var(--dim); font-size: 12px; }
+  .imu-map { display:flex; align-items:flex-start; justify-content:center; gap:16px; padding:10px 8px; }
+  .compass { position:relative; width:110px; height:110px; flex-shrink:0; }
+  .c-ring { width:100%; height:100%; border:2px solid var(--border); border-radius:50%; position:relative; }
+  .c-lbl { position:absolute; font-size:8px; font-weight:bold; color:var(--dim); }
+  .c-lbl.n { top:2px; left:50%; transform:translateX(-50%); color:var(--accent); }
+  .c-lbl.s { bottom:2px; left:50%; transform:translateX(-50%); }
+  .c-lbl.e { right:4px; top:50%; transform:translateY(-50%); }
+  .c-lbl.w { left:4px; top:50%; transform:translateY(-50%); }
+  .needle { position:absolute; top:50%; left:50%; width:3px; height:42px; margin-left:-1.5px; margin-top:-38px; background:linear-gradient(var(--accent) 50%,var(--red) 50%); border-radius:2px; transform-origin:50% 80%; transition:transform 0.15s; }
+  .c-center { position:absolute; top:50%; left:50%; width:6px; height:6px; margin:-3px; background:var(--text); border-radius:50%; }
+  .hdg { text-align:center; font-size:16px; font-weight:bold; margin-top:4px; }
+  .hdg span { color:var(--dim); font-size:10px; }
 
-  .state-box { padding: 14px; }
-  .state-name { font-size: 26px; font-weight: bold; color: var(--accent); text-shadow: 0 0 15px var(--accent-dim); }
-  .chips { display: flex; gap: 8px; margin-top: 8px; }
-  .chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 3px 8px; border-radius: 3px; font-size: 10px;
-    background: var(--surface2); border: 1px solid var(--border);
-  }
-  .cdot { width: 8px; height: 8px; border-radius: 2px; }
-  .flow { padding: 10px 14px; display: flex; flex-wrap: wrap; gap: 3px; }
-  .fs {
-    padding: 3px 6px; font-size: 8px; border-radius: 2px;
-    background: var(--surface2); border: 1px solid var(--border); color: var(--dim);
-  }
-  .fs.on { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); font-weight: bold; }
-  .fa { color: var(--dim); font-size: 8px; display: flex; align-items: center; }
+  .map-col { display:flex; flex-direction:column; align-items:center; }
+  .arena-map { width:160px; height:160px; border:2px solid var(--border); position:relative; background:var(--surface2); border-radius:4px; }
+  .arena-map .zone { position:absolute; opacity:0.5; }
+  .zone-a { top:0; left:50%; transform:translateX(-50%); width:40px; height:8px; border:1px solid var(--green); background:var(--accent-dim); border-radius:2px; }
+  .zone-b { bottom:0; left:50%; transform:translateX(-50%); width:40px; height:8px; border:1px solid var(--red); background:#ff445533; border-radius:2px; }
+  .zone-l { left:0; top:50%; transform:translateY(-50%); width:8px; height:40px; border:1px solid var(--dim); border-radius:2px; }
+  .zone-r { right:0; top:50%; transform:translateY(-50%); width:8px; height:40px; border:1px solid var(--dim); border-radius:2px; }
+  .center-cross { position:absolute; top:50%; left:50%; width:6px; height:6px; margin:-3px; border:1px solid var(--dim); border-radius:50%; opacity:0.3; }
+  .robot-dot { position:absolute; width:10px; height:10px; background:var(--accent); border-radius:50%; transform:translate(-50%,-50%); transition:all 0.3s; box-shadow:0 0 8px var(--accent); }
+  .mlbl { position:absolute; font-size:7px; font-weight:bold; }
+  .mlbl-a { top:1px; left:50%; transform:translateX(-50%); color:var(--green); }
+  .mlbl-b { bottom:1px; left:50%; transform:translateX(-50%); color:var(--red); }
+  .pos-info { text-align:center; font-size:9px; color:var(--dim); margin-top:4px; }
+  .pos-info .val { color:var(--accent); font-weight:bold; }
 
-  .compass-wrap { display: flex; align-items: center; justify-content: center; padding: 16px; }
-  .compass { position: relative; width: 130px; height: 130px; }
-  .c-ring { width: 100%; height: 100%; border: 2px solid var(--border); border-radius: 50%; position: relative; }
-  .c-lbl { position: absolute; font-size: 9px; font-weight: bold; color: var(--dim); }
-  .c-lbl.n { top: 3px; left: 50%; transform: translateX(-50%); color: var(--accent); }
-  .c-lbl.s { bottom: 3px; left: 50%; transform: translateX(-50%); }
-  .c-lbl.e { right: 5px; top: 50%; transform: translateY(-50%); }
-  .c-lbl.w { left: 5px; top: 50%; transform: translateY(-50%); }
-  .needle {
-    position: absolute; top: 50%; left: 50%; width: 3px; height: 50px;
-    margin-left: -1.5px; margin-top: -45px;
-    background: linear-gradient(var(--accent) 50%, var(--red) 50%);
-    border-radius: 2px; transform-origin: 50% 78%; transition: transform 0.15s;
-  }
-  .c-center { position: absolute; top:50%; left:50%; width:8px; height:8px; margin:-4px; background:var(--text); border-radius:50%; }
-  .hdg { text-align: center; font-size: 20px; font-weight: bold; margin-top: 6px; }
-  .hdg span { color: var(--dim); font-size: 12px; }
+  .cubes { display:grid; grid-template-columns:1fr 1fr; gap:5px; padding:8px 10px; }
+  .cc { display:flex; align-items:center; gap:5px; padding:6px 8px; background:var(--surface2); border-radius:4px; border:1px solid var(--border); }
+  .cb { width:16px; height:16px; border-radius:3px; }
+  .cv { font-size:16px; font-weight:bold; }
+  .cl { font-size:8px; color:var(--dim); text-transform:uppercase; }
+  .total { padding:8px 12px; border-top:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+  .tv { font-size:24px; font-weight:bold; color:var(--accent); }
+  .tl { font-size:9px; color:var(--dim); }
 
-  .cubes { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 12px; }
-  .cc {
-    display: flex; align-items: center; gap: 6px; padding: 8px 10px;
-    background: var(--surface2); border-radius: 4px; border: 1px solid var(--border);
+  /* --- Control panel --- */
+  .ctrl-box { padding:10px 12px; }
+  .btn-row { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:6px; }
+  .btn-row.full { grid-template-columns:1fr; }
+  .btn {
+    padding:10px 8px; border:none; border-radius:4px; font-family:inherit;
+    font-weight:bold; letter-spacing:1px; text-transform:uppercase; font-size:11px;
+    cursor:pointer; transition:transform 0.05s, filter 0.15s;
   }
-  .cb { width: 20px; height: 20px; border-radius: 3px; }
-  .cv { font-size: 18px; font-weight: bold; }
-  .cl { font-size: 9px; color: var(--dim); text-transform: uppercase; }
-  .total {
-    padding: 10px 14px; border-top: 1px solid var(--border);
-    display: flex; justify-content: space-between; align-items: center;
-  }
-  .tv { font-size: 28px; font-weight: bold; color: var(--accent); }
-  .tl { font-size: 10px; color: var(--dim); }
+  .btn:hover { filter:brightness(1.15); }
+  .btn:active { transform:scale(0.97); }
+  .btn:disabled { opacity:0.35; cursor:not-allowed; }
+  .btn-start { background:var(--green); color:#000; }
+  .btn-pause { background:var(--yellow); color:#000; }
+  .btn-reset { background:var(--red); color:#fff; }
+  .btn-imu { background:var(--blue); color:#fff; }
+  .btn-apply { background:var(--accent); color:#000; width:100%; margin-top:8px; }
 
-  @media(max-width:800px) { .grid { grid-template-columns: 1fr; } .cam-card { grid-row: auto; } }
+  /* --- Explorer panel --- */
+  .xp-box { padding:10px 12px; }
+  .xp-phase { font-size:13px; font-weight:bold; color:var(--accent); margin-bottom:6px; letter-spacing:1px; }
+  .xp-phase.idle { color:var(--dim); font-weight:normal; }
+  .xp-sides { display:grid; grid-template-columns:1fr 1fr; gap:6px; }
+  .xp-side {
+    display:flex; align-items:center; gap:6px; padding:5px 8px;
+    background:var(--surface2); border:1px solid var(--border); border-radius:3px;
+  }
+  .xp-side-label { font-size:10px; font-weight:bold; letter-spacing:1px; color:var(--dim); }
+  .xp-side-state { font-size:14px; }
+  .xp-side.done .xp-side-state { color:var(--green); }
+  .xp-side.pending .xp-side-state { color:var(--dim); }
+
+  /* --- Config panel --- */
+  .cfg-box { padding:10px 12px; }
+  .cfg-row {
+    display:grid; grid-template-columns:22px 50px 1fr; gap:8px;
+    align-items:center; padding:6px 4px; border-bottom:1px solid var(--border);
+  }
+  .cfg-row:last-of-type { border-bottom:none; }
+  .cfg-row input[type=checkbox] { width:18px; height:18px; accent-color:var(--accent); cursor:pointer; }
+  .cfg-row .cname { font-size:11px; font-weight:bold; text-transform:uppercase; }
+  .cfg-row .cswatch { width:14px; height:14px; border-radius:2px; display:inline-block; margin-right:4px; vertical-align:middle; }
+  .cfg-row select {
+    width:100%; padding:6px 8px; font-family:inherit; font-size:10px;
+    background:var(--surface2); border:1px solid var(--border); color:var(--text);
+    border-radius:3px; cursor:pointer;
+  }
+  .cfg-row select:disabled { opacity:0.3; cursor:not-allowed; }
+  .cfg-note { font-size:9px; color:var(--dim); margin-top:6px; line-height:1.4; }
+
+  @media(max-width:800px) { .grid{grid-template-columns:1fr;} .cam-card{grid-row:auto;} .imu-map{flex-direction:column;align-items:center;} }
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>ROBOT <span>DASHBOARD</span></h1>
-  <div class="conn"><div class="dot off" id="dot"></div><span id="ct">Connexion...</span></div>
+  <h1>ROBOT <span>DASHBOARD v9</span></h1>
+  <div class="conn">
+    <span class="run-badge paused" id="run-badge">PAUSE</span>
+    <span><div class="dot off" id="dot"></div><span id="ct">Connexion...</span></span>
+  </div>
 </div>
 <div class="grid">
   <div class="card cam-card">
     <div class="card-head">Camera + Detections</div>
-    <div class="cam-box">
-      <img id="cam" style="display:none">
-      <div class="wait" id="nf">En attente...</div>
-    </div>
+    <div class="cam-box"><img id="cam" style="display:none"><div class="wait" id="nf">En attente...</div></div>
   </div>
-  <div style="display:flex;flex-direction:column;gap:12px;">
+  <div style="display:flex;flex-direction:column;gap:10px;">
+
+    <div class="card">
+      <div class="card-head">Controle</div>
+      <div class="ctrl-box">
+        <div class="btn-row">
+          <button class="btn btn-start" id="btn-start">Start</button>
+          <button class="btn btn-pause" id="btn-pause">Pause</button>
+        </div>
+        <div class="btn-row" style="margin-top:6px;">
+          <button class="btn btn-reset" id="btn-reset">Reset</button>
+          <button class="btn btn-imu" id="btn-imu">Reset IMU</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">Config cubes a trier</div>
+      <div class="cfg-box">
+        <div class="cfg-row">
+          <input type="checkbox" id="chk-green">
+          <span class="cname"><span class="cswatch" style="background:#00ff88"></span>Vert</span>
+          <select id="sel-green"><option value="0">Mur A (haut)</option><option value="180">Mur B (bas)</option></select>
+        </div>
+        <div class="cfg-row">
+          <input type="checkbox" id="chk-blue">
+          <span class="cname"><span class="cswatch" style="background:#4488ff"></span>Bleu</span>
+          <select id="sel-blue"><option value="0">Mur A (haut)</option><option value="180">Mur B (bas)</option></select>
+        </div>
+        <div class="cfg-row">
+          <input type="checkbox" id="chk-yellow">
+          <span class="cname"><span class="cswatch" style="background:#ffcc00"></span>Jaune</span>
+          <select id="sel-yellow"><option value="180">Mur B (bas)</option><option value="0">Mur A (haut)</option></select>
+        </div>
+        <div class="cfg-row">
+          <input type="checkbox" id="chk-red">
+          <span class="cname"><span class="cswatch" style="background:#ff4455"></span>Rouge</span>
+          <select id="sel-red"><option value="180">Mur B (bas)</option><option value="0">Mur A (haut)</option></select>
+        </div>
+        <button class="btn btn-apply" id="btn-apply">Appliquer</button>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-head">Etat</div>
       <div class="state-box">
-        <div class="state-name" id="sn">—</div>
+        <div class="state-name" id="sn">&mdash;</div>
         <div class="chips">
-          <div class="chip"><div class="cdot" id="td" style="background:#333"></div><span id="tt">—</span></div>
-          <div class="chip"><span id="at">area: —</span></div>
+          <div class="chip"><div class="cdot" id="td" style="background:#333"></div><span id="tt">&mdash;</span></div>
+          <div class="chip"><span id="at">area: &mdash;</span></div>
+          <div class="chip" title="rotation accumulee dans CHERCHER / seuil auto-stop"><span id="crot">rot: &mdash;</span></div>
         </div>
       </div>
-      <div class="flow" id="fl"></div>
     </div>
+
     <div class="card">
-      <div class="card-head">IMU</div>
-      <div class="compass-wrap"><div>
-        <div class="compass">
-          <div class="c-ring">
-            <div class="c-lbl n">A</div><div class="c-lbl s">B</div>
-            <div class="c-lbl e">90</div><div class="c-lbl w">-90</div>
+      <div class="card-head">Exploration</div>
+      <div class="xp-box">
+        <div class="xp-phase idle" id="xp-phase">inactif</div>
+        <div class="xp-sides">
+          <div class="xp-side pending" id="xp-left">
+            <span class="xp-side-state" id="xp-left-state">&#9675;</span>
+            <span class="xp-side-label">Cote gauche</span>
           </div>
-          <div class="needle" id="ndl"></div><div class="c-center"></div>
+          <div class="xp-side pending" id="xp-right">
+            <span class="xp-side-state" id="xp-right-state">&#9675;</span>
+            <span class="xp-side-label">Cote droit</span>
+          </div>
         </div>
-        <div class="hdg"><span id="hv">0.0</span><span>°</span></div>
-      </div></div>
+      </div>
     </div>
+
     <div class="card">
-      <div class="card-head">Cubes</div>
+      <div class="card-head">IMU + Position</div>
+      <div class="imu-map">
+        <div>
+          <div class="compass">
+            <div class="c-ring">
+              <div class="c-lbl n">A</div><div class="c-lbl s">B</div>
+              <div class="c-lbl e">90</div><div class="c-lbl w">-90</div>
+            </div>
+            <div class="needle" id="ndl"></div><div class="c-center"></div>
+          </div>
+          <div class="hdg"><span id="hv">0.0</span><span>&deg;</span></div>
+        </div>
+        <div class="map-col">
+          <div class="arena-map">
+            <div class="zone zone-a"></div><div class="zone zone-b"></div>
+            <div class="zone zone-l"></div><div class="zone zone-r"></div>
+            <div class="center-cross"></div>
+            <div class="mlbl mlbl-a">A</div><div class="mlbl mlbl-b">B</div>
+            <div class="robot-dot" id="rdot" style="left:50%;top:50%;"></div>
+          </div>
+          <div class="pos-info">(<span class="val" id="px">0.00</span>, <span class="val" id="py">0.00</span>)</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">Cubes tries</div>
       <div class="cubes">
         <div class="cc"><div class="cb" style="background:#00ff88"></div><div><div class="cv" id="cg">0</div><div class="cl">Vert</div></div></div>
         <div class="cc"><div class="cb" style="background:#4488ff"></div><div><div class="cv" id="cb">0</div><div class="cl">Bleu</div></div></div>
@@ -146,57 +278,185 @@
       </div>
       <div class="total"><div class="tl">TOTAL</div><div class="tv" id="tot">0</div></div>
     </div>
+
   </div>
 </div>
 <script>
-const ST=['CHERCHER','ALIGNER','APPROCHER','POUSSER','RETOUR_CENTRE','ORIENTER_ZONE','POUSSER_DROIT','RETOUR','CHERCHER'];
-const CM={red:'#ff4455',green:'#00ff88',blue:'#4488ff',yellow:'#ffcc00'};
-const fl=document.getElementById('fl');
-ST.forEach((s,i)=>{
-  const e=document.createElement('div');e.className='fs';e.textContent=s;e.dataset.s=s;fl.appendChild(e);
-  if(i<ST.length-1){const a=document.createElement('div');a.className='fa';a.textContent='→';fl.appendChild(a);}
-});
+const CM = {red:'#ff4455', green:'#00ff88', blue:'#4488ff', yellow:'#ffcc00'};
+const COLORS = ['green', 'blue', 'yellow', 'red'];
+const host = window.location.hostname || '11.255.255.201';
+const API = `http://${host}:8080`;
+let ok = false;
 
-const host=window.location.hostname||'11.255.255.201';
-let ok=false;
+// Libelles fr des phases EXPLORER (affichees dans la carte Exploration)
+const XP_LABELS = {
+  'GOTO_LEFT':    'Aller vers LEFT_QUAD',
+  'ADV_LEFT':     'Avance vers LEFT_QUAD',
+  'SCAN_L1':      'Scan gauche 1/2 (90 -> 0)',
+  'SCAN_L2':      'Scan gauche 2/2 (0 -> 180)',
+  'DONE_LEFT':    'Cote gauche termine',
+  'GOTO_RIGHT':   'Aller vers RIGHT_QUAD',
+  'ADV_RIGHT':    'Avance vers RIGHT_QUAD',
+  'SCAN_R1':      'Scan droite 1/2 (-90 -> -180)',
+  'SCAN_R2':      'Scan droite 2/2 (-180 -> 0)',
+  'DONE_RIGHT':   'Cote droit termine',
+  'GOTO_CENTER':  'Retour vers centre',
+  'ADV_CENTER':   'Avance retour centre',
+  'FINAL_ORIENT': 'Orientation finale (face A)',
+  'DONE_ALL':     'Termine',
+};
 
-async function poll(){
-  try{
-    const r=await fetch(`http://${host}:8080/api/state`);
-    const d=await r.json();
-    if(!ok){ok=true;document.getElementById('dot').className='dot on';document.getElementById('ct').textContent='Connecte';}
-    const s=d.state||{};
-    document.getElementById('sn').textContent=s.state||'—';
-    document.querySelectorAll('.fs').forEach(e=>e.classList.toggle('on',e.dataset.s===s.state));
-    const tg=s.target||null;
-    document.getElementById('td').style.background=tg?CM[tg]||'#333':'#333';
-    document.getElementById('tt').textContent=tg||'—';
-    document.getElementById('at').textContent='area: '+(s.last_area||0);
-    document.getElementById('hv').textContent=(d.imu||0).toFixed(1);
-    document.getElementById('ndl').style.transform='rotate('+(d.imu||0)+'deg)';
-    const so=s.sorted||{};
-    document.getElementById('cg').textContent=so.green||0;
-    document.getElementById('cb').textContent=so.blue||0;
-    document.getElementById('cy').textContent=so.yellow||0;
-    document.getElementById('cr').textContent=so.red||0;
-    document.getElementById('tot').textContent=s.total||0;
-  }catch(e){
-    if(ok){ok=false;document.getElementById('dot').className='dot off';document.getElementById('ct').textContent='Deconnecte';}
+async function postJSON(path, payload) {
+  try {
+    await fetch(`${API}${path}`, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+    });
+  } catch (e) { console.error('POST ' + path + ' failed', e); }
+}
+
+function buildConfig() {
+  const sorting = [];
+  const mapping = {};
+  for (const c of COLORS) {
+    if (document.getElementById('chk-' + c).checked) {
+      sorting.push(c);
+      mapping[c] = parseFloat(document.getElementById('sel-' + c).value);
+    }
+  }
+  return { sorting, mapping };
+}
+
+function wireButtons() {
+  document.getElementById('btn-start').addEventListener('click',
+    () => postJSON('/api/control', {action: 'start'}));
+  document.getElementById('btn-pause').addEventListener('click',
+    () => postJSON('/api/control', {action: 'pause'}));
+  document.getElementById('btn-reset').addEventListener('click', () => {
+    if (confirm('Reset complet? (stop + compteurs a 0 + servo ouvert)')) {
+      postJSON('/api/control', {action: 'reset'});
+    }
+  });
+  document.getElementById('btn-imu').addEventListener('click', () => {
+    if (confirm('Re-zeroter l IMU maintenant? (le cap actuel deviendra le nouveau 0)')) {
+      postJSON('/api/imu_reset', {});
+    }
+  });
+  document.getElementById('btn-apply').addEventListener('click', () => {
+    const cfg = buildConfig();
+    if (cfg.sorting.length === 0) {
+      alert('Coche au moins une couleur.');
+      return;
+    }
+    postJSON('/api/control', {action: 'config', ...cfg});
+  });
+
+  // Active/desactive les selects selon les cases cochees
+  for (const c of COLORS) {
+    document.getElementById('chk-' + c).addEventListener('change', (e) => {
+      document.getElementById('sel-' + c).disabled = !e.target.checked;
+    });
+    document.getElementById('sel-' + c).disabled = true;
   }
 }
 
-async function frame(){
-  try{
-    const r=await fetch(`http://${host}:8080/api/frame`);
-    const b=await r.text();
-    if(b){
-      document.getElementById('cam').src='data:image/jpeg;base64,'+b;
-      document.getElementById('cam').style.display='block';
-      document.getElementById('nf').style.display='none';
+async function poll() {
+  try {
+    const r = await fetch(`${API}/api/state`);
+    const d = await r.json();
+    if (!ok) {
+      ok = true;
+      document.getElementById('dot').className = 'dot on';
+      document.getElementById('ct').textContent = 'Connecte';
     }
-  }catch(e){}
+    const s = d.state || {};
+
+    // Badge: 3 etats - ACTIVE (en cours), TERMINE (auto-stop), PAUSE (manuel)
+    const badge = document.getElementById('run-badge');
+    if (s.active === true) {
+      badge.className = 'run-badge active';
+      badge.textContent = 'ACTIVE';
+    } else if (s.auto_stopped === true) {
+      badge.className = 'run-badge done';
+      badge.textContent = 'TERMINE';
+    } else {
+      badge.className = 'run-badge paused';
+      badge.textContent = 'PAUSE';
+    }
+
+    document.getElementById('sn').textContent = s.state || '—';
+    const tg = s.target || null;
+    document.getElementById('td').style.background = tg ? (CM[tg] || '#333') : '#333';
+    document.getElementById('tt').textContent = tg || '—';
+    document.getElementById('at').textContent = 'area: ' + (s.last_area || 0);
+    const rot = s.chercher_rot || 0;
+    const maxRot = s.auto_stop_deg || 720;
+    document.getElementById('crot').textContent = 'rot: ' + rot + '/' + maxRot + '°';
+
+    // Exploration: phase courante + statut des 2 cotes
+    const xpPhase = s.explorer_phase || null;
+    const xpEl = document.getElementById('xp-phase');
+    const inExplorer = (s.state === 'EXPLORER' || s.state === 'EXPLORER_RETURN_CENTER');
+    if (xpPhase && inExplorer) {
+      xpEl.className = 'xp-phase';
+      xpEl.textContent = XP_LABELS[xpPhase] || xpPhase;
+    } else {
+      xpEl.className = 'xp-phase idle';
+      xpEl.textContent = inExplorer ? (XP_LABELS[xpPhase] || xpPhase || 'en cours') : 'inactif';
+    }
+    const lEl = document.getElementById('xp-left');
+    const rEl = document.getElementById('xp-right');
+    if (s.left_explored) {
+      lEl.className = 'xp-side done';
+      document.getElementById('xp-left-state').innerHTML = '&#10003;';
+    } else {
+      lEl.className = 'xp-side pending';
+      document.getElementById('xp-left-state').innerHTML = '&#9675;';
+    }
+    if (s.right_explored) {
+      rEl.className = 'xp-side done';
+      document.getElementById('xp-right-state').innerHTML = '&#10003;';
+    } else {
+      rEl.className = 'xp-side pending';
+      document.getElementById('xp-right-state').innerHTML = '&#9675;';
+    }
+    document.getElementById('hv').textContent = (d.imu || 0).toFixed(1);
+    document.getElementById('ndl').style.transform = 'rotate(' + (d.imu || 0) + 'deg)';
+    const ax = s.odom_x || 0, ay = s.odom_y || 0;
+    const mapX = ((ax + 1.2) / 2.4) * 100, mapY = ((1.2 - ay) / 2.4) * 100;
+    document.getElementById('rdot').style.left = Math.max(5, Math.min(95, mapX)) + '%';
+    document.getElementById('rdot').style.top = Math.max(5, Math.min(95, mapY)) + '%';
+    document.getElementById('px').textContent = ax.toFixed(2);
+    document.getElementById('py').textContent = ay.toFixed(2);
+    const so = s.sorted || {};
+    document.getElementById('cg').textContent = so.green || 0;
+    document.getElementById('cb').textContent = so.blue || 0;
+    document.getElementById('cy').textContent = so.yellow || 0;
+    document.getElementById('cr').textContent = so.red || 0;
+    document.getElementById('tot').textContent = s.total || 0;
+  } catch (e) {
+    if (ok) {
+      ok = false;
+      document.getElementById('dot').className = 'dot off';
+      document.getElementById('ct').textContent = 'Deconnecte';
+    }
+  }
 }
 
+async function frame() {
+  try {
+    const r = await fetch(`${API}/api/frame`);
+    const b = await r.text();
+    if (b) {
+      document.getElementById('cam').src = 'data:image/jpeg;base64,' + b;
+      document.getElementById('cam').style.display = 'block';
+      document.getElementById('nf').style.display = 'none';
+    }
+  } catch (e) {}
+}
+
+wireButtons();
 setInterval(poll, 150);
 setInterval(frame, 200);
 </script>

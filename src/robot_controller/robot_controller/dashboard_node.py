@@ -1,6 +1,28 @@
+"""Dashboard web temps reel + endpoints de controle.
+
+Le noeud fait 2 choses en parallele:
+
+1. Abonnement ROS (thread principal rclpy.spin):
+     /robot_status      (depuis cube_strategy)  -> etat de la strategie
+     /cube_detections   (depuis cube_detector)  -> cubes visibles
+     /imu/heading       (depuis imu_node)       -> cap courant
+     /image_raw         (depuis v4l2_camera)    -> annote + JPEG + base64
+
+2. Serveur HTTP sur port 8080 (thread dedie):
+     GET  /                 page HTML du dashboard (index.html)
+     GET  /api/state        JSON avec etat/cap/detections (polled par le front)
+     GET  /api/frame        dernier frame camera en JPEG base64
+     POST /api/control      -> republie sur /robot_control (JSON)
+                                 actions: start, pause, reset, config
+     POST /api/imu_reset    -> republie sur /imu/reset (Empty)
+
+L'instance du noeud est stockee dans une globale _node pour que les handlers
+HTTP (qui tournent dans un thread separe) puissent y acceder. Les publishers
+rclpy sont thread-safe.
+"""
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float32, String
+from std_msgs.msg import Float32, String, Empty
 from sensor_msgs.msg import Image
 import json
 import time
@@ -13,9 +35,19 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 
 class DashboardNode(Node):
+    # Rendu camera annote: couleurs BGR des bounding boxes par cube
+    COLOR_MAP_BGR = {
+        'red':    (0, 0, 255),
+        'green':  (0, 255, 0),
+        'blue':   (255, 100, 0),
+        'yellow': (0, 255, 255),
+    }
+    JPEG_QUALITY = 65
+
     def __init__(self):
         super().__init__('dashboard_node')
 
+        # Derniers messages recus, servis via les endpoints GET
         self.latest_data = json.dumps({})
         self.latest_frame_b64 = None
         self.latest_state = {}
@@ -26,10 +58,28 @@ class DashboardNode(Node):
         self.create_subscription(String, '/cube_detections', self.detections_cb, 10)
         self.create_subscription(Float32, '/imu/heading', self.imu_cb, 10)
         self.create_subscription(Image, '/image_raw', self.image_cb, 10)
+
+        # Publishers utilises par les endpoints POST (appels depuis l'UI)
+        self.control_pub = self.create_publisher(String, '/robot_control', 10)
+        self.imu_reset_pub = self.create_publisher(Empty, '/imu/reset', 10)
+
+        # Compactage des donnees pour le GET /api/state (10Hz)
         self.create_timer(0.1, self.update_data)
 
         self.get_logger().info('=== DASHBOARD NODE ===')
         self.get_logger().info('Web UI: http://0.0.0.0:8080')
+
+    # ----- appeles depuis les handlers HTTP (thread serveur) -----
+
+    def publish_control(self, payload):
+        msg = String()
+        msg.data = json.dumps(payload)
+        self.control_pub.publish(msg)
+
+    def publish_imu_reset(self):
+        self.imu_reset_pub.publish(Empty())
+
+    # ----- callbacks ROS -----
 
     def status_cb(self, msg):
         self.latest_state = json.loads(msg.data)
@@ -41,7 +91,10 @@ class DashboardNode(Node):
         self.latest_imu = msg.data
 
     def image_cb(self, msg):
+        """Decode le frame, l'annote avec les bounding boxes des detections
+        puis l'encode en JPEG base64 pour etre servi par GET /api/frame."""
         try:
+            # Gestion de plusieurs encodings possibles de v4l2_camera
             if msg.encoding == 'rgb8':
                 img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
@@ -53,30 +106,48 @@ class DashboardNode(Node):
             else:
                 img = np.frombuffer(msg.data, dtype=np.uint8).reshape(msg.height, msg.width, 3)
 
+            # Annote chaque cube detecte (ghosts en trait fin, reels en trait epais)
             dets = self.latest_detections.get('detections', [])
             for d in dets:
-                x, y, w, h = d.get('x',0), d.get('y',0), d.get('w',0), d.get('h',0)
-                cn = d.get('color','')
-                area = d.get('area',0)
+                x, y = d.get('x', 0), d.get('y', 0)
+                w, h = d.get('w', 0), d.get('h', 0)
+                cn = d.get('color', '')
+                area = d.get('area', 0)
                 ghost = d.get('ghost', False)
-                cmap = {'red':(0,0,255),'green':(0,255,0),'blue':(255,0,0),'yellow':(0,255,255)}
-                bgr = cmap.get(cn, (255,255,255))
-                t = 1 if ghost else 2
-                cv2.rectangle(img, (int(x-w/2),int(y-h/2)), (int(x+w/2),int(y+h/2)), bgr, t)
-                cv2.putText(img, f'{cn} {area}', (int(x-w/2), int(y-h/2)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, bgr, 1)
+                bgr = self.COLOR_MAP_BGR.get(cn, (255, 255, 255))
+                thick = 1 if ghost else 2
+                cv2.rectangle(img,
+                              (int(x - w / 2), int(y - h / 2)),
+                              (int(x + w / 2), int(y + h / 2)),
+                              bgr, thick)
+                cv2.putText(img, f'{cn} {area}',
+                            (int(x - w / 2), int(y - h / 2) - 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, bgr, 1)
 
+            # Ligne centrale verticale (reference visuelle pour l'alignement
+            # des cubes pendant ALIGNER/APPROCHER) + labels d'etat
             ih, iw = img.shape[:2]
-            cv2.line(img, (iw//2, 0), (iw//2, ih), (128,128,128), 1)
-            st = self.latest_state.get('state','')
-            cv2.putText(img, st, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,255,136), 2)
-            cv2.putText(img, f'IMU:{self.latest_imu:.1f}', (10, ih-15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200,200,200), 1)
+            cv2.line(img, (iw // 2, 0), (iw // 2, ih), (128, 128, 128), 1)
+            st = self.latest_state.get('state', '')
+            cv2.putText(img, st, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 136), 2)
+            cv2.putText(img, f'IMU:{self.latest_imu:.1f}', (10, ih - 15),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            # Overlay PAUSE pendant la grace period d'EXPLORER scan (visuel net
+            # pour verifier que la pause a bien lieu et sa duree reelle).
+            if self.latest_state.get('ex_pausing'):
+                cv2.rectangle(img, (iw // 2 - 90, ih // 2 - 30),
+                              (iw // 2 + 90, ih // 2 + 15), (0, 140, 255), -1)
+                cv2.putText(img, 'PAUSE SCAN',
+                            (iw // 2 - 80, ih // 2 + 5),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
 
-            _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 65])
+            _, jpeg = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, self.JPEG_QUALITY])
             self.latest_frame_b64 = base64.b64encode(jpeg.tobytes()).decode('utf-8')
         except Exception as e:
             self.get_logger().warn(f'Image error: {e}')
 
     def update_data(self):
+        """Compacte les dernieres donnees en 1 JSON servi par /api/state."""
         self.latest_data = json.dumps({
             'state': self.latest_state,
             'detections': self.latest_detections,
@@ -85,11 +156,20 @@ class DashboardNode(Node):
         })
 
 
+# Instance globale accessible depuis les handlers HTTP (autre thread).
 _node = None
 
 
 class Handler(BaseHTTPRequestHandler):
+    """Handler HTTP minimal: GET pour les pages/datasets, POST pour les commandes.
+
+    Tous les endpoints retournent CORS permissif (Access-Control-Allow-Origin: *)
+    pour que le dashboard soit utilisable depuis n'importe quel PC/telephone
+    connecte au meme reseau que le Pi.
+    """
+
     def log_message(self, fmt, *args):
+        # Silence la verbose par defaut (sinon chaque GET /api/frame log)
         pass
 
     def do_GET(self):
@@ -102,7 +182,34 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def do_POST(self):
+        """Boutons du dashboard -> republication sur topic ROS."""
+        if self.path == '/api/control':
+            length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(length).decode('utf-8') if length > 0 else '{}'
+            try:
+                payload = json.loads(body)
+            except Exception:
+                self.send_error(400, 'bad json')
+                return
+            _node.publish_control(payload)
+            self.send_json('{"ok":true}')
+        elif self.path == '/api/imu_reset':
+            _node.publish_imu_reset()
+            self.send_json('{"ok":true}')
+        else:
+            self.send_error(404)
+
+    def do_OPTIONS(self):
+        # Preflight CORS pour les POST depuis navigateur
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
     def serve_file(self, name, ctype):
+        """Sert un fichier statique depuis le dossier web2/ du workspace."""
         web_dir = os.path.expanduser('~/ROS2_WS/src/robot_controller/web2')
         path = os.path.join(web_dir, name)
         if os.path.exists(path):
@@ -118,6 +225,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
         self.wfile.write(data.encode())
 
@@ -134,7 +243,12 @@ def main(args=None):
     rclpy.init(args=args)
     _node = DashboardNode()
 
-    t = threading.Thread(target=lambda: HTTPServer(('0.0.0.0', 8080), Handler).serve_forever(), daemon=True)
+    # Serveur HTTP dans un thread daemon (se termine avec le process).
+    # rclpy.spin() bloque le thread principal pour traiter les callbacks ROS.
+    t = threading.Thread(
+        target=lambda: HTTPServer(('0.0.0.0', 8080), Handler).serve_forever(),
+        daemon=True,
+    )
     t.start()
 
     try:
