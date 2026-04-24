@@ -5,6 +5,7 @@ Robot autonome **ROS 2 Jazzy** qui détecte, capture et dépose des cubes color�
 ![ROS 2 Jazzy](https://img.shields.io/badge/ROS%202-Jazzy-blue)
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-green)
 ![Plateforme](https://img.shields.io/badge/plateforme-GoPiGo3-orange)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 <p align="center">
   <img src="assets/robot_démo.gif" alt="Demo" width="600"/>
